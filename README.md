@@ -27,6 +27,17 @@ Recommended node values:
 
 The model alias `gemini-3.1-flash-image` is automatically mapped to Grsai model `nano-banana-2`.
 
+## GPT Image 2
+
+The same `grsai_nano_banana` request mode also auto-routes GPT Image models:
+
+- `gpt-image-2`
+- `gpt-image-2-vip`
+
+When either model is used, the node posts to `https://grsai.dakka.com.cn/v1/draw/completions` and polls `https://grsai.dakka.com.cn/v1/draw/result`.
+
+For GPT Image, the node maps `aspect_ratio` plus `resolution` into Grsai's pixel `aspectRatio` value. For example, `16:9` + `1K` becomes `1672x941` for `gpt-image-2`, and `1280x720` for `gpt-image-2-vip`.
+
 ## Inputs
 
 - `api_url`: API base URL. For Grsai, use `https://grsai.dakka.com.cn`.

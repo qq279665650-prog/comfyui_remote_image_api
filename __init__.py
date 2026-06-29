@@ -57,7 +57,8 @@ SUPPORTED_MODELS = [
     "nano-banana-pro", "nano-banana-fast", "nano-banana-pro-vt",
     "nano-banana-2-lite", "nano-banana-2-pro", "nano-banana-pro-vip",
     "nano-banana-pro-4k-vip", "gemini-3-pro-image-preview",
-    "seedream-4.5", "flux-pro-1.1", "gpt-image-1.5"
+    "seedream-4.5", "flux-pro-1.1", "gpt-image-1.5",
+    "gpt-image-2", "gpt-image-2-vip"
 ]
 SUPPORTED_RESOLUTIONS = ["1K", "2K", "4K"]
 SUPPORTED_ASPECT_RATIOS = ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9"]
@@ -1441,6 +1442,56 @@ class GrsaiNanoBananaBatch(GrsaiNanoBanana):
 
 class ThirdPartyImagePostAPI(_GrsaiNodeBase):
     CATEGORY = "Nkxx/API"
+    GRSAI_NANO_BANANA_MODELS = {
+        "nano-banana-2", "nano-banana-2-cl", "nano-banana-2-4k-cl",
+        "nano-banana-fast", "nano-banana", "nano-banana-pro",
+        "nano-banana-pro-vt", "nano-banana-pro-cl",
+        "nano-banana-pro-vip", "nano-banana-pro-4k-vip",
+        "nano-banana-2-lite", "nano-banana-2-pro",
+    }
+    GRSAI_GPT_IMAGE_MODELS = {"gpt-image-2", "gpt-image-2-vip"}
+    GPT_IMAGE_SIZE_MAP = {
+        "gpt-image-2": {
+            "1K": {
+                "auto": "auto", "1:1": "1024x1024", "16:9": "1672x941", "9:16": "941x1672",
+                "4:3": "1443x1090", "3:4": "1090x1443", "3:2": "1536x1024",
+                "2:3": "1024x1536", "5:4": "1408x1120", "4:5": "1120x1408",
+                "21:9": "1920x832",
+            },
+            "2K": {
+                "auto": "auto", "1:1": "1024x1024", "16:9": "1672x941", "9:16": "941x1672",
+                "4:3": "1443x1090", "3:4": "1090x1443", "3:2": "1536x1024",
+                "2:3": "1024x1536", "5:4": "1408x1120", "4:5": "1120x1408",
+                "21:9": "1920x832",
+            },
+            "4K": {
+                "auto": "auto", "1:1": "1024x1024", "16:9": "1672x941", "9:16": "941x1672",
+                "4:3": "1443x1090", "3:4": "1090x1443", "3:2": "1536x1024",
+                "2:3": "1024x1536", "5:4": "1408x1120", "4:5": "1120x1408",
+                "21:9": "1920x832",
+            },
+        },
+        "gpt-image-2-vip": {
+            "1K": {
+                "auto": "auto", "1:1": "1024x1024", "16:9": "1280x720", "9:16": "720x1280",
+                "4:3": "1152x864", "3:4": "864x1152", "3:2": "1536x1024",
+                "2:3": "1024x1536", "5:4": "1120x896", "4:5": "896x1120",
+                "21:9": "1456x624",
+            },
+            "2K": {
+                "auto": "auto", "1:1": "2048x2048", "16:9": "2048x1152", "9:16": "1152x2048",
+                "4:3": "2304x1728", "3:4": "1728x2304", "3:2": "2048x1360",
+                "2:3": "1360x2048", "5:4": "2240x1792", "4:5": "1792x2240",
+                "21:9": "2912x1248",
+            },
+            "4K": {
+                "auto": "auto", "1:1": "2880x2880", "16:9": "3840x2160", "9:16": "2160x3840",
+                "4:3": "3264x2448", "3:4": "2448x3264", "3:2": "3504x2336",
+                "2:3": "2336x3504", "5:4": "3200x2560", "4:5": "2560x3200",
+                "21:9": "3840x1648",
+            },
+        },
+    }
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -1490,7 +1541,7 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
 
     def _normalize_grsai_base_url(self, api_url: str) -> str:
         base_url = normalize_api_url(api_url or "https://grsai.dakka.com.cn").rstrip("/")
-        for suffix in ("/v1/draw/nano-banana", "/v1/draw/result", "/v1"):
+        for suffix in ("/v1/draw/nano-banana", "/v1/draw/completions", "/v1/draw/result", "/v1"):
             if base_url.endswith(suffix):
                 base_url = base_url[:-len(suffix)]
         return base_url.rstrip("/")
@@ -1504,6 +1555,30 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
             "gemini-3.1-flash-image-preview": "nano-banana-2",
         }
         return aliases.get(value.lower(), value)
+
+    def _grsai_draw_path_for_model(self, model: str) -> str:
+        model_key = (model or "").strip().lower()
+        if model_key in self.GRSAI_GPT_IMAGE_MODELS:
+            return "/v1/draw/completions"
+        if model_key in self.GRSAI_NANO_BANANA_MODELS:
+            return "/v1/draw/nano-banana"
+        supported = ", ".join(sorted(self.GRSAI_NANO_BANANA_MODELS | self.GRSAI_GPT_IMAGE_MODELS))
+        raise Exception(f"Model '{model}' is not supported by grsai_nano_banana mode. Supported Grsai models: {supported}")
+
+    def _gpt_image_aspect_ratio(self, model: str, aspect_ratio: str, resolution: str) -> str:
+        model_key = (model or "").strip().lower()
+        res_key = (resolution or "1K").strip().upper()
+        ratio_key = (aspect_ratio or "auto").strip()
+        if model_key == "gpt-image-2":
+            if res_key != "1K":
+                raise Exception("gpt-image-2 only supports 1K sizes. Use gpt-image-2-vip for 2K/4K.")
+            size_map = self.GPT_IMAGE_SIZE_MAP["gpt-image-2"]["1K"]
+        else:
+            model_map = self.GPT_IMAGE_SIZE_MAP.get(model_key) or self.GPT_IMAGE_SIZE_MAP["gpt-image-2-vip"]
+            size_map = model_map.get(res_key)
+            if not size_map:
+                raise Exception(f"Unsupported GPT Image resolution '{resolution}' for model '{model}'.")
+        return size_map.get(ratio_key) or size_map.get("auto") or "auto"
 
     def _pick_task_id(self, response_json: Dict) -> Optional[str]:
         candidates = [response_json]
@@ -1519,15 +1594,28 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
         return None
 
     def _failure_message(self, response_json: Any) -> str:
-        if isinstance(response_json, dict):
+        def pick_message(obj: Any) -> Optional[str]:
+            if not isinstance(obj, dict):
+                return None
             for key in ("failure_reason", "error", "message", "msg"):
-                value = response_json.get(key)
-                if value:
-                    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                value = obj.get(key)
+                if value is None or value == "":
+                    continue
+                text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                if text.strip().lower() not in {"success", "ok", "succeeded"}:
+                    return text
+            return None
+        if isinstance(response_json, dict):
             data = response_json.get("data")
             if isinstance(data, dict):
-                return self._failure_message(data)
-        return "unknown failure"
+                nested = pick_message(data)
+                if nested:
+                    return nested
+            root = pick_message(response_json)
+            if root:
+                return root
+            return response_summary(response_json)
+        return str(response_json)
 
     def _root_or_data_value(self, response_json: Any, key: str) -> Any:
         if not isinstance(response_json, dict):
@@ -1580,28 +1668,40 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
         if not api_key or not api_key.strip():
             raise Exception("Missing api_key")
         base_url = self._normalize_grsai_base_url(api_url)
-        draw_url = f"{base_url}/v1/draw/nano-banana"
         result_url = f"{base_url}/v1/draw/result"
         headers = self._build_headers(api_key, auth_mode, extra_headers_json)
         headers["Content-Type"] = "application/json"
 
         uploaded_urls, temps = self._upload_grsai_images(images, api_key.strip(), proxies) if images else ([], [])
         try:
-            payload = {
-                "model": self._normalize_grsai_model(model),
-                "prompt": prompt,
-                "aspectRatio": aspect_ratio,
-                "imageSize": resolution,
-                "urls": uploaded_urls,
-                "webHook": "-1",
-            }
+            grsai_model = self._normalize_grsai_model(model)
+            draw_path = self._grsai_draw_path_for_model(grsai_model)
+            draw_url = f"{base_url}{draw_path}"
+            if draw_path == "/v1/draw/completions":
+                payload = {
+                    "model": grsai_model,
+                    "prompt": prompt,
+                    "aspectRatio": self._gpt_image_aspect_ratio(grsai_model, aspect_ratio, resolution),
+                    "urls": uploaded_urls,
+                    "variants": 1,
+                    "webHook": "-1",
+                }
+            else:
+                payload = {
+                    "model": grsai_model,
+                    "prompt": prompt,
+                    "aspectRatio": aspect_ratio,
+                    "imageSize": resolution,
+                    "urls": uploaded_urls,
+                    "webHook": "-1",
+                }
             payload.update(parse_json_object(extra_payload_json, "extra_payload_json"))
 
             start_time = time.time()
             task_json = self._post_json_dict(draw_url, headers, payload, timeout=min(timeout, 120.0), proxies=proxies)
             try:
                 direct_images = self._load_images_from_response(task_json, "", timeout=timeout, proxies=proxies)
-                return direct_images, f"[GRSAI] Success: {len(direct_images)} image(s)"
+                return direct_images, f"[GRSAI] Success: {len(direct_images)} image(s), endpoint={draw_path}"
             except Exception:
                 pass
 
@@ -1619,15 +1719,15 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
                 status = self._root_or_data_value(result_json, "status")
                 status_text = str(status or "").lower()
 
-                if status_text in {"failed", "failure", "error"}:
-                    raise Exception(f"Generation failed: {self._failure_message(result_json)}")
-
                 try:
                     result_images = self._load_images_from_response(result_json, "", timeout=timeout, proxies=proxies)
                     if progress_number is None or progress_number >= 100 or status_text in {"success", "succeeded", "completed", "done", "finished"}:
-                        return result_images, f"[GRSAI] Success: {len(result_images)} image(s), task={task_id}"
+                        return result_images, f"[GRSAI] Success: {len(result_images)} image(s), task={task_id}, endpoint={draw_path}"
                 except Exception:
                     pass
+
+                if status_text in {"failed", "failure", "error"}:
+                    raise Exception(f"Generation failed: {self._failure_message(result_json)}")
 
                 time.sleep(2)
 
