@@ -44,6 +44,7 @@ class AnyType(str):
     def __ne__(self, __value): return False
 
 GLOBAL_SESSION = requests.Session()
+GLOBAL_SESSION.trust_env = False
 _retry = Retry(total=0, connect=1, read=0, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=frozenset(["GET", "POST"]))
 _adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=_retry)
 GLOBAL_SESSION.mount("https://", _adapter)
@@ -521,6 +522,7 @@ class ApiqikGeminiNode:
 
     def _robust_post_request(self, url, headers, json_data, ignore_ssl=True, max_retries=5):
         session = requests.Session()
+        session.trust_env = False
         headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
         adapter = HTTPAdapter(max_retries=Retry(total=max_retries, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["POST"]))
         session.mount("https://", adapter); session.mount("http://", adapter)
@@ -1443,13 +1445,13 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_url": ("STRING", {"default": "https://api.example.com/v1/images/generations"}),
+                "api_url": ("STRING", {"default": "https://grsai.dakka.com.cn"}),
                 "api_key": ("STRING", {"default": ""}),
-                "model": ("STRING", {"default": "nano-banana-pro"}),
+                "model": ("STRING", {"default": "nano-banana-2"}),
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "aspect_ratio": (SUPPORTED_ASPECT_RATIOS, {"default": "16:9"}),
                 "resolution": (SUPPORTED_RESOLUTIONS, {"default": "1K"}),
-                "request_mode": (["json_base64", "multipart"], {"default": "json_base64"}),
+                "request_mode": (["grsai_nano_banana", "json_base64", "multipart"], {"default": "grsai_nano_banana"}),
                 "auth_mode": (["bearer", "x-api-key", "none"], {"default": "bearer"}),
                 "timeout_seconds": ("INT", {"default": 180, "min": 5, "max": 1800}),
             },
@@ -1485,6 +1487,153 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
         extra_headers = parse_json_object(extra_headers_json, "extra_headers_json")
         headers.update({str(k): str(v) for k, v in extra_headers.items()})
         return headers
+
+    def _normalize_grsai_base_url(self, api_url: str) -> str:
+        base_url = normalize_api_url(api_url or "https://grsai.dakka.com.cn").rstrip("/")
+        for suffix in ("/v1/draw/nano-banana", "/v1/draw/result", "/v1"):
+            if base_url.endswith(suffix):
+                base_url = base_url[:-len(suffix)]
+        return base_url.rstrip("/")
+
+    def _normalize_grsai_model(self, model: str) -> str:
+        value = (model or "").strip()
+        if not value:
+            return "nano-banana-2"
+        aliases = {
+            "gemini-3.1-flash-image": "nano-banana-2",
+            "gemini-3.1-flash-image-preview": "nano-banana-2",
+        }
+        return aliases.get(value.lower(), value)
+
+    def _pick_task_id(self, response_json: Dict) -> Optional[str]:
+        candidates = [response_json]
+        if isinstance(response_json, dict) and isinstance(response_json.get("data"), dict):
+            candidates.append(response_json["data"])
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            for key in ("id", "taskId", "task_id"):
+                value = item.get(key)
+                if value:
+                    return str(value)
+        return None
+
+    def _failure_message(self, response_json: Any) -> str:
+        if isinstance(response_json, dict):
+            for key in ("failure_reason", "error", "message", "msg"):
+                value = response_json.get(key)
+                if value:
+                    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            data = response_json.get("data")
+            if isinstance(data, dict):
+                return self._failure_message(data)
+        return "unknown failure"
+
+    def _root_or_data_value(self, response_json: Any, key: str) -> Any:
+        if not isinstance(response_json, dict):
+            return None
+        if key in response_json:
+            return response_json.get(key)
+        data = response_json.get("data")
+        if isinstance(data, dict):
+            return data.get(key)
+        return None
+
+    def _progress_number(self, value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except Exception:
+                return None
+        return None
+
+    def _post_json_dict(self, url: str, headers: Dict[str, str], payload: Dict, timeout: float, proxies: Optional[Dict]) -> Dict:
+        safe_timeout = max(10.0, float(timeout))
+        resp = GLOBAL_SESSION.post(url, headers=headers, json=payload, timeout=safe_timeout, proxies=proxies)
+        if resp.status_code >= 400:
+            raise Exception(f"HTTP {resp.status_code}: {resp.text[:900]}")
+        return self._parse_response_json(resp)
+
+    def _upload_grsai_images(self, images: List[Image.Image], api_key: str, proxies: Optional[Dict]) -> Tuple[List[str], List[str]]:
+        urls, temps = [], []
+        try:
+            for idx, image in enumerate(images):
+                with tempfile.NamedTemporaryFile(suffix=f"_grsai_{idx}.png", delete=False) as tmp:
+                    safe_pil_to_rgb(image).save(tmp, "PNG")
+                    temps.append(tmp.name)
+            for path in temps:
+                uploaded = upload_file_zh(path, proxies=proxies, specific_key=api_key)
+                if not uploaded or uploaded.startswith("Error"):
+                    raise Exception(f"Image upload failed: {uploaded}")
+                urls.append(uploaded)
+            return urls, temps
+        except Exception:
+            self._cleanup_temp_files(temps)
+            raise
+
+    def _execute_grsai_nano_banana(self, api_url: str, api_key: str, model: str, prompt: str,
+                                   aspect_ratio: str, resolution: str, timeout: float,
+                                   images: List[Image.Image], auth_mode: str, extra_payload_json: str,
+                                   extra_headers_json: str, proxies: Optional[Dict]) -> Tuple[List[Image.Image], str]:
+        if not api_key or not api_key.strip():
+            raise Exception("Missing api_key")
+        base_url = self._normalize_grsai_base_url(api_url)
+        draw_url = f"{base_url}/v1/draw/nano-banana"
+        result_url = f"{base_url}/v1/draw/result"
+        headers = self._build_headers(api_key, auth_mode, extra_headers_json)
+        headers["Content-Type"] = "application/json"
+
+        uploaded_urls, temps = self._upload_grsai_images(images, api_key.strip(), proxies) if images else ([], [])
+        try:
+            payload = {
+                "model": self._normalize_grsai_model(model),
+                "prompt": prompt,
+                "aspectRatio": aspect_ratio,
+                "imageSize": resolution,
+                "urls": uploaded_urls,
+                "webHook": "-1",
+            }
+            payload.update(parse_json_object(extra_payload_json, "extra_payload_json"))
+
+            start_time = time.time()
+            task_json = self._post_json_dict(draw_url, headers, payload, timeout=min(timeout, 120.0), proxies=proxies)
+            try:
+                direct_images = self._load_images_from_response(task_json, "", timeout=timeout, proxies=proxies)
+                return direct_images, f"[GRSAI] Success: {len(direct_images)} image(s)"
+            except Exception:
+                pass
+
+            task_id = self._pick_task_id(task_json)
+            if not task_id:
+                raise Exception(f"No task id found in response: {response_summary(task_json)}")
+
+            deadline = start_time + timeout
+            last_json = task_json
+            while time.time() < deadline:
+                result_json = self._post_json_dict(result_url, headers, {"id": task_id}, timeout=30.0, proxies=proxies)
+                last_json = result_json
+                progress = self._root_or_data_value(result_json, "progress")
+                progress_number = self._progress_number(progress)
+                status = self._root_or_data_value(result_json, "status")
+                status_text = str(status or "").lower()
+
+                if status_text in {"failed", "failure", "error"}:
+                    raise Exception(f"Generation failed: {self._failure_message(result_json)}")
+
+                try:
+                    result_images = self._load_images_from_response(result_json, "", timeout=timeout, proxies=proxies)
+                    if progress_number is None or progress_number >= 100 or status_text in {"success", "succeeded", "completed", "done", "finished"}:
+                        return result_images, f"[GRSAI] Success: {len(result_images)} image(s), task={task_id}"
+                except Exception:
+                    pass
+
+                time.sleep(2)
+
+            raise TimeoutError(f"Timed out waiting for Grsai result. Last response: {response_summary(last_json)}")
+        finally:
+            self._cleanup_temp_files(temps)
 
     def _base_payload(self, model: str, prompt: str, negative_prompt: str, aspect_ratio: str, resolution: str,
                       seed: int, steps: int, cfg_scale: float, width: int, height: int, extra_payload_json: str) -> Dict:
@@ -1616,6 +1765,24 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
             for img_tensor in [image_1, image_2, image_3, image_4, image_5]:
                 if img_tensor is not None:
                     images.extend([safe_pil_to_rgb(img) for img in tensor_to_pil(img_tensor)])
+
+            if request_mode == "grsai_nano_banana":
+                result_images, message = self._execute_grsai_nano_banana(
+                    api_url=api_url,
+                    api_key=api_key,
+                    model=model,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                    timeout=timeout,
+                    images=images,
+                    auth_mode=auth_mode,
+                    extra_payload_json=extra_payload_json,
+                    extra_headers_json=extra_headers_json,
+                    proxies=proxies,
+                )
+                return wrap(pil_to_tensor(result_images), message, 0)
+
             payload = self._base_payload(model, prompt, negative_prompt, aspect_ratio, resolution, seed, steps, cfg_scale, width, height, extra_payload_json)
             headers = self._build_headers(api_key, auth_mode, extra_headers_json)
 
