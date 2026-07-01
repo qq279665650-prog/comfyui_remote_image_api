@@ -136,6 +136,28 @@ def parse_json_object(text: str, field_name: str) -> Dict:
         raise Exception(f"{field_name} must be a JSON object")
     return parsed
 
+def coerce_randomizable_seed(seed: Any) -> int:
+    if seed is None:
+        return random.getrandbits(63)
+    if isinstance(seed, bool):
+        return int(seed)
+    if isinstance(seed, (int, float)):
+        try:
+            value = int(seed)
+        except Exception:
+            return random.getrandbits(63)
+        return random.getrandbits(63) if value < 0 else value
+    if isinstance(seed, str):
+        text = seed.strip()
+        if not text or text.lower() in {"randomize", "random", "auto", "rand", "seed_random"}:
+            return random.getrandbits(63)
+        try:
+            value = int(float(text))
+        except Exception:
+            return random.getrandbits(63)
+        return random.getrandbits(63) if value < 0 else value
+    return random.getrandbits(63)
+
 def extract_json_path(value: Any, path: str) -> Any:
     if not path or not path.strip():
         return value
@@ -1502,7 +1524,7 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "aspect_ratio": (SUPPORTED_ASPECT_RATIOS, {"default": "16:9"}),
                 "resolution": (SUPPORTED_RESOLUTIONS, {"default": "1K"}),
-                "request_mode": (["grsai_nano_banana", "json_base64", "multipart"], {"default": "grsai_nano_banana"}),
+                "request_mode": (["grsai_nano_banana", "wuyin_nano_banana2", "wuyin_nano_banana_pro", "wuyin_query_result", "json_base64", "multipart"], {"default": "grsai_nano_banana"}),
                 "auth_mode": (["bearer", "x-api-key", "none"], {"default": "bearer"}),
                 "timeout_seconds": ("INT", {"default": 180, "min": 5, "max": 1800}),
             },
@@ -1515,6 +1537,7 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
                 "poll_url": ("STRING", {"default": "", "placeholder": "Optional async poll endpoint. Use {id} placeholder."}),
                 "poll_id_path": ("STRING", {"default": "", "placeholder": "Optional, e.g. id, task_id, data.id"}),
                 "result_status_path": ("STRING", {"default": "", "placeholder": "Optional, e.g. status or data.status"}),
+                "task_id": ("STRING", {"default": "", "placeholder": "For wuyin_query_result, paste the async task id here."}),
                 "proxy_url": ("STRING", {"default": ""}),
                 "fallback_image": ("IMAGE",),
                 "video_1": ("VIDEO",),
@@ -1545,6 +1568,42 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
             if base_url.endswith(suffix):
                 base_url = base_url[:-len(suffix)]
         return base_url.rstrip("/")
+
+    def _normalize_wuyin_base_url(self, api_url: str) -> str:
+        base_url = normalize_api_url(api_url or "https://api.wuyinkeji.com").rstrip("/")
+        for suffix in ("/api/async/image_nanoBanana2", "/api/async/image_nanoBanana_pro", "/api/async/detail", "/api/async", "/doc/65", "/doc/55", "/doc/47"):
+            if base_url.endswith(suffix):
+                base_url = base_url[:-len(suffix)]
+        return base_url.rstrip("/")
+
+    def _wuyin_nano_banana_endpoint(self, model: str, request_mode: str = "") -> Tuple[str, str]:
+        model_key = (model or "").strip().lower().replace("_", "-")
+        mode_key = (request_mode or "").strip().lower()
+        if mode_key == "wuyin_nano_banana_pro" or model_key in {
+            "nano-banana-pro",
+            "nanobanana-pro",
+            "nano-banana-pro-vip",
+            "nano-banana-pro-4k-vip",
+        }:
+            return "/api/async/image_nanoBanana_pro", "nano-banana-pro"
+        return "/api/async/image_nanoBanana2", "nano-banana-2"
+
+    def _build_wuyin_headers(self, api_key: str, extra_headers_json: str) -> Dict[str, str]:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if api_key and api_key.strip():
+            headers["Authorization"] = api_key.strip()
+        extra_headers = parse_json_object(extra_headers_json, "extra_headers_json")
+        headers.update({str(k): str(v) for k, v in extra_headers.items()})
+        return headers
+
+    def _wuyin_key_params(self, api_key: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        params = dict(extra or {})
+        if api_key and api_key.strip() and "key" not in params:
+            params["key"] = api_key.strip()
+        return params
 
     def _normalize_grsai_model(self, model: str) -> str:
         value = (model or "").strip()
@@ -1644,6 +1703,35 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
             raise Exception(f"HTTP {resp.status_code}: {resp.text[:900]}")
         return self._parse_response_json(resp)
 
+    def _post_wuyin_json_dict(self, url: str, headers: Dict[str, str], payload: Dict, timeout: float,
+                               proxies: Optional[Dict], api_key: str) -> Dict:
+        safe_timeout = max(10.0, float(timeout))
+        resp = GLOBAL_SESSION.post(
+            url,
+            headers=headers,
+            json=payload,
+            params=self._wuyin_key_params(api_key),
+            timeout=safe_timeout,
+            proxies=proxies,
+        )
+        if resp.status_code >= 400:
+            raise Exception(f"HTTP {resp.status_code}: {resp.text[:900]}")
+        return self._parse_response_json(resp)
+
+    def _get_wuyin_detail(self, base_url: str, api_key: str, task_id: str, headers: Dict[str, str],
+                          timeout: float, proxies: Optional[Dict]) -> Dict:
+        url = f"{base_url.rstrip('/')}/api/async/detail"
+        resp = GLOBAL_SESSION.get(
+            url,
+            headers=headers,
+            params=self._wuyin_key_params(api_key, {"id": task_id}),
+            timeout=max(10.0, float(timeout)),
+            proxies=proxies,
+        )
+        if resp.status_code >= 400:
+            raise Exception(f"HTTP {resp.status_code}: {resp.text[:900]}")
+        return self._parse_response_json(resp)
+
     def _upload_grsai_images(self, images: List[Image.Image], api_key: str, proxies: Optional[Dict]) -> Tuple[List[str], List[str]]:
         urls, temps = [], []
         try:
@@ -1735,8 +1823,95 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
         finally:
             self._cleanup_temp_files(temps)
 
+    def _execute_wuyin_nano_banana2(self, api_url: str, api_key: str, model: str, prompt: str,
+                                     aspect_ratio: str, resolution: str, timeout: float,
+                                     images: Optional[List[Image.Image]],
+                                     extra_payload_json: str, extra_headers_json: str,
+                                     proxies: Optional[Dict], task_id: str = "",
+                                     request_mode: str = "") -> Tuple[List[Image.Image], str]:
+        if not api_key or not api_key.strip():
+            raise Exception("Missing api_key")
+
+        base_url = self._normalize_wuyin_base_url(api_url)
+        submit_path, endpoint_label = self._wuyin_nano_banana_endpoint(model, request_mode)
+        submit_url = f"{base_url}{submit_path}"
+        headers = self._build_wuyin_headers(api_key, extra_headers_json)
+
+        extra_payload = parse_json_object(extra_payload_json, "extra_payload_json")
+        urls_value = extra_payload.get("urls", [])
+        if urls_value is None:
+            urls_value = []
+        if not isinstance(urls_value, list):
+            raise Exception("extra_payload_json.urls must be an array when provided")
+
+        payload = {
+            "prompt": prompt,
+            "size": (resolution or "1K").strip().upper(),
+            "aspectRatio": (aspect_ratio or "auto").strip(),
+            "urls": urls_value,
+        }
+        payload.update(extra_payload)
+        if "size" in payload and isinstance(payload["size"], str):
+            payload["size"] = payload["size"].strip().upper()
+        if "aspectRatio" in payload and isinstance(payload["aspectRatio"], str):
+            payload["aspectRatio"] = payload["aspectRatio"].strip()
+        if "urls" not in payload or payload["urls"] is None:
+            payload["urls"] = []
+        if not isinstance(payload["urls"], list):
+            raise Exception("Wuyin payload field 'urls' must be an array")
+        reference_note = ""
+        if images and not payload["urls"]:
+            reference_note = f" Local reference images were ignored because Wuyin {endpoint_label} requires public URLs. Put them in extra_payload_json, for example {{\"urls\":[\"https://example.com/ref.jpg\"]}}."
+
+        if task_id and task_id.strip():
+            detail_json = self._get_wuyin_detail(base_url, api_key, task_id.strip(), headers, timeout, proxies)
+            try:
+                result_images = self._load_images_from_response(detail_json, "", timeout=timeout, proxies=proxies)
+                return result_images, f"[WUYIN] Success: {len(result_images)} image(s), task={task_id.strip()}, endpoint={submit_path}{reference_note}"
+            except Exception:
+                status = self._root_or_data_value(detail_json, "status")
+                if str(status).strip() in {"3", "failed", "failure", "error"}:
+                    raise Exception(f"Generation failed: {self._failure_message(detail_json)}")
+                raise Exception(f"No image found in detail response: {response_summary(detail_json)}")
+
+        start_time = time.time()
+        task_json = self._post_wuyin_json_dict(submit_url, headers, payload, timeout=min(timeout, 120.0), proxies=proxies, api_key=api_key)
+        try:
+            direct_images = self._load_images_from_response(task_json, "", timeout=timeout, proxies=proxies)
+            return direct_images, f"[WUYIN] Success: {len(direct_images)} image(s), endpoint={submit_path}{reference_note}"
+        except Exception:
+            pass
+
+        task_id = self._pick_task_id(task_json)
+        if not task_id:
+            raise Exception(f"No task id found in response: {response_summary(task_json)}")
+
+        deadline = start_time + timeout
+        last_json = task_json
+        while time.time() < deadline:
+            result_json = self._get_wuyin_detail(base_url, api_key, task_id, headers, timeout=30.0, proxies=proxies)
+            last_json = result_json
+            progress = self._root_or_data_value(result_json, "progress")
+            progress_number = self._progress_number(progress)
+            status = self._root_or_data_value(result_json, "status")
+            status_text = str(status if status is not None else "").strip().lower()
+
+            try:
+                result_images = self._load_images_from_response(result_json, "", timeout=timeout, proxies=proxies)
+                if progress_number is None or progress_number >= 100 or status_text in {"2", "success", "succeeded", "completed", "done", "finished"}:
+                    return result_images, f"[WUYIN] Success: {len(result_images)} image(s), task={task_id}, endpoint={submit_path}{reference_note}"
+            except Exception:
+                pass
+
+            if status_text in {"3", "failed", "failure", "error"}:
+                raise Exception(f"Generation failed: {self._failure_message(result_json)}")
+
+            time.sleep(2)
+
+        raise TimeoutError(f"Timed out waiting for Wuyin result. Last response: {response_summary(last_json)}")
+
     def _base_payload(self, model: str, prompt: str, negative_prompt: str, aspect_ratio: str, resolution: str,
-                      seed: int, steps: int, cfg_scale: float, width: int, height: int, extra_payload_json: str) -> Dict:
+                      seed: Any, steps: int, cfg_scale: float, width: int, height: int, extra_payload_json: str) -> Dict:
         calc_width, calc_height = calculate_dimensions(resolution, aspect_ratio)
         payload = {
             "model": model,
@@ -1750,8 +1925,9 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
         }
         if negative_prompt:
             payload["negative_prompt"] = negative_prompt
-        if seed is not None and int(seed) >= 0:
-            payload["seed"] = int(seed)
+        normalized_seed = coerce_randomizable_seed(seed)
+        if normalized_seed is not None and int(normalized_seed) >= 0:
+            payload["seed"] = int(normalized_seed)
         if steps and int(steps) > 0:
             payload["steps"] = int(steps)
         if cfg_scale and float(cfg_scale) > 0:
@@ -1865,6 +2041,7 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
             for img_tensor in [image_1, image_2, image_3, image_4, image_5]:
                 if img_tensor is not None:
                     images.extend([safe_pil_to_rgb(img) for img in tensor_to_pil(img_tensor)])
+            seed_value = coerce_randomizable_seed(seed)
 
             if request_mode == "grsai_nano_banana":
                 result_images, message = self._execute_grsai_nano_banana(
@@ -1883,7 +2060,45 @@ class ThirdPartyImagePostAPI(_GrsaiNodeBase):
                 )
                 return wrap(pil_to_tensor(result_images), message, 0)
 
-            payload = self._base_payload(model, prompt, negative_prompt, aspect_ratio, resolution, seed, steps, cfg_scale, width, height, extra_payload_json)
+            if request_mode in {"wuyin_nano_banana2", "wuyin_nano_banana_pro"}:
+                result_images, message = self._execute_wuyin_nano_banana2(
+                    api_url=api_url,
+                    api_key=api_key,
+                    model=model,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                    timeout=timeout,
+                    images=images,
+                    extra_payload_json=extra_payload_json,
+                    extra_headers_json=extra_headers_json,
+                    proxies=proxies,
+                    request_mode=request_mode,
+                )
+                return wrap(pil_to_tensor(result_images), message, 0)
+
+            if request_mode == "wuyin_query_result":
+                query_task_id = str(kwargs.get("task_id", "") or "").strip()
+                if not query_task_id:
+                    return wrap(fail_safe_image, "Missing task_id for wuyin_query_result", 1)
+                result_images, message = self._execute_wuyin_nano_banana2(
+                    api_url=api_url,
+                    api_key=api_key,
+                    model=model,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                    timeout=timeout,
+                    images=[],
+                    extra_payload_json=extra_payload_json,
+                    extra_headers_json=extra_headers_json,
+                    proxies=proxies,
+                    task_id=query_task_id,
+                    request_mode=request_mode,
+                )
+                return wrap(pil_to_tensor(result_images), message, 0)
+
+            payload = self._base_payload(model, prompt, negative_prompt, aspect_ratio, resolution, seed_value, steps, cfg_scale, width, height, extra_payload_json)
             headers = self._build_headers(api_key, auth_mode, extra_headers_json)
 
             if request_mode == "multipart":

@@ -38,6 +38,31 @@ When either model is used, the node posts to `https://grsai.dakka.com.cn/v1/draw
 
 For GPT Image, the node maps `aspect_ratio` plus `resolution` into Grsai's pixel `aspectRatio` value. For example, `16:9` + `1K` becomes `1672x941` for `gpt-image-2`, and `1280x720` for `gpt-image-2-vip`.
 
+## Wuyin / 速创 NanoBanana
+
+This plugin also supports Wuyin's NanoBanana APIs:
+
+1. Submit a generation task to `https://api.wuyinkeji.com/api/async/image_nanoBanana2` or `https://api.wuyinkeji.com/api/async/image_nanoBanana_pro`.
+2. Poll `https://api.wuyinkeji.com/api/async/detail` with the returned task id.
+3. Parse returned image URLs or base64 data into ComfyUI `IMAGE`.
+
+Recommended node values:
+
+- `api_url`: `https://api.wuyinkeji.com`
+- `request_mode`: `wuyin_nano_banana2` for NanoBanana2, or `wuyin_nano_banana_pro` for NanoBanana Pro
+- `model`: `nano-banana-pro` also auto-routes to `image_nanoBanana_pro`
+- `auth_mode`: any value is acceptable; the node sends the API key in `Authorization`
+- `resolution`: `1K`, `2K`, or `4K`
+- `aspect_ratio`: `auto`, `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`
+
+Wuyin reference images must be public URLs. Put them in `extra_payload_json`, for example:
+
+```json
+{"urls":["https://example.com/ref1.jpg","https://example.com/ref2.jpg"]}
+```
+
+To query an existing Wuyin task, switch `request_mode` to `wuyin_query_result` and fill `task_id`.
+
 ## Inputs
 
 - `api_url`: API base URL. For Grsai, use `https://grsai.dakka.com.cn`.
@@ -47,10 +72,12 @@ For GPT Image, the node maps `aspect_ratio` plus `resolution` into Grsai's pixel
 - `aspect_ratio`: Output ratio.
 - `resolution`: Image size preset.
 - `request_mode`: Use `grsai_nano_banana` for the verified Grsai flow.
+- `request_mode`: `grsai_nano_banana`, `wuyin_nano_banana2`, `wuyin_nano_banana_pro`, `wuyin_query_result`, `json_base64`, or `multipart`.
 - `auth_mode`: Use `bearer` for Grsai.
 - `image_1` to `image_5`: Optional reference images.
 - `extra_payload_json`: Optional JSON fields to merge into the Grsai task payload.
 - `extra_headers_json`: Optional extra HTTP headers.
+- `task_id`: Used by `wuyin_query_result` to fetch an existing job.
 - `proxy_url`: Optional proxy URL. Leave empty for direct connection.
 - `fallback_image`: Optional image returned when the request fails.
 
@@ -70,6 +97,7 @@ The older generic modes are still available:
 - `multipart`: Sends input images as multipart form files.
 
 For Grsai Nano Banana generation, use `grsai_nano_banana`.
+For Wuyin NanoBanana2, use `wuyin_nano_banana2`; for Wuyin NanoBanana Pro, use `wuyin_nano_banana_pro` or set `model` to `nano-banana-pro`. Use `wuyin_query_result` for result lookup only.
 
 ## Install
 
